@@ -1,59 +1,59 @@
 # BigShebang 🌌
 
-**The archive that carries its own ignition.**
+**The seed that carries its own soil.**
 
-BigShebang is a secure, self-contained archive creator: a single executable file that packs a directory, encrypts it, and then unpacks itself anywhere it is run. It is implemented as a deterministic **State Machine Automaton** within a single Bash script.
+BigShebang is a high-fidelity, self-extracting **Distribution Automaton**. It creates portable "vessels" that contain entire directory structures, preserving every nuance of the original environment (permissions, symlinks, xattrs) and ensuring absolute fidelity upon seeding.
 
-Built for the **0xacabOS** ecosystem, BigShebang treats packaging as a lifecycle: a compact universe that unfolds itself through a cryptographically verified chain of custody.
+Implemented as a deterministic **State Machine Automaton** within a single Bash script, BigShebang is the primary distribution engine for the **0xacabOS** ecosystem.
 
 ---
 
 ## 🛠 Features
 
 - **Automaton Architecture:** Orchestrated as a formal state machine for deterministic resilience and absolute reliability.
-- **Binary Tail Extraction:** High-performance payload delivery. No Base64 overhead; the archive is appended directly to the script tail and sliced out with byte-level precision.
-- **Cryptographic Provenance:** Every transformation (Archive -> Encrypt -> Assemble) generates a SHA-256 signature, creating a verifiable chain of custody.
-- **Grimoire Oracle:** A dedicated knowledge layer (`--grimoire`) that speaks the project's intent and holographic manifest to humans and AIs without decryption.
-- **Self-Validating:** Internal self-diagnostic protocol (`--self-test`) ensures the environment is capable of perfect integrity before processing data.
-- **Recursive Extraction:** The archive can carry a copy of its own creator (`-R`), ensuring the "recursive dream" of self-contained distribution.
-- **High Fidelity:** Full preservation of GNU tar metadata, including ACLs, xattrs, and SELinux contexts.
-- **3l33t Aesthetics:** Native support for `file_id.diz` ANSI banners and a clean, high-signal CLI interface.
+- **Binary Tail Extraction:** High-performance payload delivery. The distribution vessel is appended directly to the script tail and unfolded with byte-level precision.
+- **Cryptographic Provenance:** Every transformation (Archive -> Harden -> Assemble) generates a SHA-256 signature, creating a verifiable chain of custody.
+- **Grimoire Oracle:** A dedicated knowledge layer (`--grimoire`) that speaks the project's intent and holographic manifest to humans and AIs without needing to unfold the vessel.
+- **Radical Openness:** Optimized for open distribution. Encryption is a "Hardening" option, not a barrier to transparency.
+- **Self-Validating:** Internal self-diagnostic protocol (`--self-test`) ensures the environment is capable of perfect integrity before seeding.
+- **Recursive Dream:** The vessel can carry a copy of its own creator (`-R`), ensuring the lineage continues.
 
-## 🔒 Security
+## 🔒 Payload Hardening (Optional)
 
+While BigShebang is designed for open distribution, it supports optional **Payload Hardening** for secure transport:
 - **Encryption:** AES-256-CBC via OpenSSL.
 - **Key Derivation:** PBKDF2 with 100,000 iterations and SHA-512.
-- **Integrity:** Mandatory SHA-256 verification of the payload before decryption.
 
 ## 🚀 Usage
 
-### Create an Archive
+### Create a Distribution Vessel
 ```bash
-./bigshebang [OPTIONS] <source_directory> [output_file]
+./bigshebang [OPTIONS] <source_directory> [vessel_file]
 ```
 **Options:**
 - `-c, --compress TYPE` : none, gzip, bzip2, xz, zstd (default: gzip)
-- `-p, --password PASS` : Provide password (prompted if omitted)
-- `-R, --recursive`     : Include a copy of `bigshebang` inside the archive
-- `-T, --self-test`    : Run internal self-diagnostic before archiving
+- `-e, --encrypt`       : Harden the vessel with encryption
+- `-p, --password PASS` : Provide hardening password (implies -e)
+- `-R, --recursive`     : Include a copy of `bigshebang` inside the vessel
+- `-T, --self-test`    : Run internal self-diagnostic before creation
 - `-B, --no-banner`      : Suppress branding output
 
-### Extract
+### Seed a Vessel
 ```bash
-./my_project.secure.sh -p "your_password" -d /path/to/target
+./my_project.vessel.sh -d /path/to/target
 ```
 
 ### Commune with the Grimoire
 ```bash
-./my_project.secure.sh --grimoire
+./my_project.vessel.sh --grimoire
 ```
 
 ## 🏗 Philosophy
 
-BigShebang treats the file format not just as a container, but as a **Protocol**. By moving from procedural logic to a state-machine automaton, we ensure that the "Big Bang" of your project's deployment is resilient, verifiable, and elegant.
+BigShebang treats distribution not as a "transfer," but as a **Seeding**. By moving from procedural logic to a state-machine automaton, we ensure that the "Big Bang" of your project's deployment is resilient, verifiable, and elegant. It is the soil in which your code grows.
 
 ## 📜 Version
-Current Version: `7.23` (Automaton Edition)
+Current Version: `7.23` (Seeder Edition)
 
 ---
 Brought to you by the **0xacabOS** Project.

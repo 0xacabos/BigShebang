@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-# BIGSHEBANG - Secure Self-Extracting Archive Creator
+# BIGSHEBANG - Self-Extracting Distribution Automaton
 # ============================================================================
 #
+# Tagline: The seed that carries its own soil.
+#
 # Description:
-#   Creates a password-protected self-extracting shell script that contains
-#   an entire directory tree structure with all files, preserving data and
-#   metadata fidelity (permissions, timestamps, ownership, symlinks, xattrs).
+#   Creates high-fidelity, self-extracting distribution vessels. Preserves
+#   every nuance of the source environment (permissions, symlinks, xattrs)
+#   and includes a holographic manifest for AI/Human ingest.
 #
 # Usage:
-#   ./bigshebang.sh [OPTIONS] <source_directory> [output_file]
+#   ./bigshebang [OPTIONS] <source_directory> [output_file]
 #
 # Options:
 #   -c, --compress TYPE    Compression type: none, gzip, bzip2, xz, zstd (default: gzip)
@@ -415,27 +417,27 @@ generate_self_extractor() {
 #!/usr/bin/env bash
 #
 # ============================================================================
-# SECURE SELF-EXTRACTING ARCHIVE
+# SELF-EXTRACTING DISTRIBUTION VESSEL
 # ============================================================================
 #
-# This is a password-protected self-extracting archive.
-# Run this script and enter the password to extract the contents.
+# This is a high-fidelity self-extracting distribution vessel.
+# Run this script to seed the contents into your local environment.
 #
 # Usage:
-#   ./archive.sh [OPTIONS]
+#   ./vessel.sh [OPTIONS]
 #
 # Options:
-#   -d, --directory DIR    Extract to specified directory (default: current)
-#   -p, --password PASS    Provide password on command line (less secure)
+#   -d, --directory DIR    Seed to specified directory (default: current)
+#   -p, --password PASS    Provide password if vessel is hardened
 #   -g, --grimoire         Display the project Grimoire (Knowledge & Manifest)
 #   -P, --no-prompt        Do not prompt; error if password missing
-#   -l, --list             List archive contents without extracting
+#   -l, --list             List vessel contents without seeding
 #   -v, --verbose          Show verbose output
 #   -h, --help             Show this help message
 #
-# Security Note:
-#   This archive uses AES-256-CBC encryption with PBKDF2 key derivation.
-#   Keep your password safe - there is no way to recover the data without it.
+# Provenance Note:
+#   This vessel is cryptographically signed and self-validating.
+#   It ensures absolute fidelity of the original environment.
 #
 # ============================================================================
 
@@ -498,23 +500,23 @@ verbose() {
 # Show help
 show_help() {
     cat << HELP
-BigShebang Archive: ${ARCHIVE_NAME}
+BigShebang Distribution Vessel: ${ARCHIVE_NAME}
 
 Usage: $0 [OPTIONS]
 
 Options:
-  -d, --directory DIR    Extract to specified directory (default: current)
-  -p, --password PASS    Provide password on command line (less secure)
+  -d, --directory DIR    Seed to specified directory (default: current)
+  -p, --password PASS    Provide password if vessel is hardened
   -g, --grimoire         Display the project Grimoire (Knowledge & Manifest)
   -P, --no-prompt        Do not prompt; error if password missing
   -B, --no-banner        Suppress header output
-  -l, --list             List archive contents without extracting
+  -l, --list             List vessel contents without seeding
   -v, --verbose          Show verbose output
   -h, --help             Show this help message
 
-Archive Information:
+Vessel Information:
   Compression: ${COMPRESSION_TYPE}
-  Encryption: ${ENCRYPTION_CIPHER} with PBKDF2 (${PBKDF2_ITERATIONS} iterations)
+  Hardening:   ${ENCRYPTION_CIPHER}
   
 HELP
     exit 0
@@ -783,17 +785,21 @@ main() {
     trap cleanup EXIT
     
     # Extract payload
-    info "Extracting payload..."
+    info "Unfolding distribution vessel..."
     extract_payload "$payload_file"
-    
+
     # Decrypt
-    info "Decrypting archive..."
+    if [[ "$ENCRYPTION_CIPHER" != "none" ]]; then
+        info "Softening hardened vessel..."
+    fi
     decrypt_archive "$payload_file" "$archive_file"
-    
+
     if [[ $LIST_ONLY -eq 1 ]]; then
         list_archive "$archive_file"
     else
+        info "Seeding contents..."
         extract_archive "$archive_file" "$EXTRACT_DIR"
+        success "Vessel unfolded. Seeding complete."
     fi
     
     # Clear trap and cleanup manually to avoid scope issues
@@ -954,7 +960,7 @@ readonly STATE_VALIDATE="VALIDATE"
 readonly STATE_CHRONICLE="CHRONICLE"
 readonly STATE_PREPARE="PREPARE"
 readonly STATE_ARCHIVE="ARCHIVE"
-readonly STATE_ENCRYPT="ENCRYPT"
+readonly STATE_HARDEN="HARDEN"
 readonly STATE_ASSEMBLE="ASSEMBLE"
 readonly STATE_FINALIZE="FINALIZE"
 readonly STATE_CLEANUP="CLEANUP"
@@ -987,7 +993,7 @@ state_init() {
     if [[ $NO_BANNER -eq 0 ]]; then
         display_header
         print_color cyan "========================================"
-        print_color cyan "  BigShebang Secure Self-Extracting Automaton"
+        print_color cyan "  BigShebang Distribution Automaton"
         print_color cyan "  Version: $SCRIPT_VERSION"
         print_color cyan "========================================"
         echo ""
@@ -1043,7 +1049,7 @@ state_validate() {
     
     # Set default output file if not specified
     if [[ -z "$OUTPUT_FILE" ]]; then
-        OUTPUT_FILE="$(basename "$SOURCE_DIR").secure.sh"
+        OUTPUT_FILE="$(basename "$SOURCE_DIR").vessel.sh"
     fi
     
     # Make output path absolute
@@ -1135,7 +1141,7 @@ run_automaton() {
             "$STATE_CHRONICLE") state_chronicle ;;
             "$STATE_PREPARE")   state_prepare ;;
             "$STATE_ARCHIVE")   state_archive ;;
-            "$STATE_ENCRYPT")   state_encrypt ;;
+            "$STATE_HARDEN")    state_harden ;;
             "$STATE_ASSEMBLE")  state_assemble ;;
             "$STATE_FINALIZE")  state_finalize ;;
             "$STATE_CLEANUP")   state_cleanup ;;
@@ -1157,7 +1163,7 @@ main() {
 # =============================================================================
 
 state_archive() {
-    info "Creating archive..."
+    info "Creating distribution archive..."
     create_tar_archive "$SOURCE_DIR" "$tar_file" "$temp_dir"
     
     HASH_ARCHIVE=$(calculate_hash "$tar_file")
@@ -1166,26 +1172,26 @@ state_archive() {
     local tar_size="$(wc -c < "$tar_file")"
     info "Archive size: $(human_readable_size "$tar_size")"
     
-    transition_to "$STATE_ENCRYPT"
+    transition_to "$STATE_HARDEN"
 }
 
-state_encrypt() {
+state_harden() {
     if [[ "$ENCRYPTION_CIPHER" == "none" ]]; then
-        info "Bypassing encryption..."
+        verbose "Payload hardening skipped (open distribution)"
         cp "$tar_file" "$encrypted_file"
         HASH_ENCRYPTED=$(calculate_hash "$encrypted_file")
         transition_to "$STATE_ASSEMBLE"
         return
     fi
 
-    info "Encrypting archive..."
+    info "Hardening distribution vessel..."
     encrypt_archive "$tar_file" "$encrypted_file"
     
     HASH_ENCRYPTED=$(calculate_hash "$encrypted_file")
-    verbose "Encrypted Hash: $HASH_ENCRYPTED"
+    verbose "Hardened Hash: $HASH_ENCRYPTED"
     
     local encrypted_size="$(wc -c < "$encrypted_file")"
-    info "Encrypted size: $(human_readable_size "$encrypted_size")"
+    info "Hardened size: $(human_readable_size "$encrypted_size")"
     
     transition_to "$STATE_ASSEMBLE"
 }
@@ -1221,14 +1227,14 @@ state_finalize() {
     print_color cyan "Size ratio:      ${ratio}%"
     echo ""
     print_color yellow "Provenance Chain (SHA-256):"
-    print_color blue "  Archive:   $HASH_ARCHIVE"
-    print_color blue "  Encrypted: $HASH_ENCRYPTED"
-    print_color blue "  Final:     $HASH_FINAL"
+    print_color blue "  Original Archive: $HASH_ARCHIVE"
+    print_color blue "  Transport Vessel: $HASH_ENCRYPTED"
+    print_color blue "  Final Script:     $HASH_FINAL"
     echo ""
     if [[ "$ENCRYPTION_CIPHER" != "none" ]]; then
-        print_color yellow "Keep your password safe - the cycle continues."
+        print_color yellow "Vessel hardened. Keep your password safe - the cycle continues."
     else
-        print_color green "Distribution vessel ready - the cycle continues."
+        print_color green "Distribution vessel ready. Open distribution - the cycle continues."
     fi
     echo ""
     

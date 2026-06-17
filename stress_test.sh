@@ -85,7 +85,7 @@ test_cycle() {
     local comp="$1"
     local recursive="$2"
     local test_id="comp_${comp}_rec_${recursive}"
-    local archive="$OUTPUT_DIR/test_${test_id}.sh"
+    local archive="$OUTPUT_DIR/test_${test_id}.vessel.sh"
     local target="$EXTRACT_DIR/$test_id"
     local password="StressTestPassword123!"
     
@@ -128,7 +128,7 @@ test_cycle() {
 test_chaos() {
     log_header "Chaos Monkey: Failure Injection"
     
-    local archive="$OUTPUT_DIR/chaos_base.sh"
+    local archive="$OUTPUT_DIR/chaos_base.vessel.sh"
     local password="chaos"
     $BIGSHEBANG -c gzip -p "$password" -o "$archive" -B "$SOURCE_DIR" >/dev/null 2>&1
     
@@ -140,7 +140,7 @@ test_chaos() {
     fi
     
     # Test 2: Bit Corruption
-    local corrupt_archive="$OUTPUT_DIR/corrupt.sh"
+    local corrupt_archive="$OUTPUT_DIR/corrupt.vessel.sh"
     cp "$archive" "$corrupt_archive"
     # Find the payload (approx 10KB in for the script header) and flip a bit
     # We'll just overwrite a byte at the end of the file
@@ -169,7 +169,7 @@ main() {
     test_cycle "gzip" "false"
     # Test 2: Passwordless (new default)
     log_info "Cycle: Encryption=none (Default)"
-    local archive="$OUTPUT_DIR/test_passwordless.sh"
+    local archive="$OUTPUT_DIR/test_passwordless.vessel.sh"
     local target="$EXTRACT_DIR/passwordless"
     if ! $BIGSHEBANG -o "$archive" -B "$SOURCE_DIR" >/dev/null 2>&1; then
         log_fail "Passwordless: Archive creation failed"

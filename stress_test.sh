@@ -164,7 +164,24 @@ main() {
         test_cycle "$c" "false"
     done
     
-    log_header "Phase 2: Recursive Capabilities"
+    log_header "Phase 2: Encryption States"
+    # Test 1: Explicit Encryption
+    test_cycle "gzip" "false"
+    # Test 2: Passwordless (new default)
+    log_info "Cycle: Encryption=none (Default)"
+    local archive="$OUTPUT_DIR/test_passwordless.sh"
+    local target="$EXTRACT_DIR/passwordless"
+    if ! $BIGSHEBANG -o "$archive" -B "$SOURCE_DIR" >/dev/null 2>&1; then
+        log_fail "Passwordless: Archive creation failed"
+    elif ! "$archive" -d "$target" -B >/dev/null 2>&1; then
+        log_fail "Passwordless: Extraction failed"
+    elif ! diff -r "$SOURCE_DIR" "$target/source" >/dev/null 2>&1; then
+        log_fail "Passwordless: Content mismatch!"
+    else
+        log_success "Passwordless: Integrity verified."
+    fi
+
+    log_header "Phase 3: Recursive Capabilities"
     test_cycle "gzip" "true"
     
     log_header "Phase 3: Security Hardening"

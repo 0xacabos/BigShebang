@@ -39,7 +39,7 @@ set -euo pipefail
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_VERSION="7.23"
-readonly ENCRYPTION_CIPHER="aes-256-cbc"
+ENCRYPTION_CIPHER="aes-256-cbc"
 readonly ENCRYPTION_DIGEST="sha512"
 readonly PBKDF2_ITERATIONS=100000
 
@@ -67,6 +67,7 @@ declare -A COMPRESS_TAR_FLAG=(
 
 COMPRESS_TYPE="gzip"
 PASSWORD=""
+ENCRYPT=0
 OUTPUT_FILE=""
 VERBOSE=0
 SOURCE_DIR=""
@@ -634,9 +635,15 @@ extract_payload() {
 decrypt_archive() {
     local input="$1"
     local output="$2"
-    
+
+    if [[ "$ENCRYPTION_CIPHER" == "none" ]]; then
+        verbose "Bypassing decryption (unencrypted archive)"
+        cp "$input" "$output"
+        return
+    fi
+
     verbose "Decrypting archive with $ENCRYPTION_CIPHER"
-    
+
     if ! openssl enc -d -"$ENCRYPTION_CIPHER" \
         -pbkdf2 \
         -iter "$PBKDF2_ITERATIONS" \
@@ -646,7 +653,7 @@ decrypt_archive() {
         -pass "pass:$PASSWORD" 2>/dev/null; then
         error "Decryption failed. Incorrect password or corrupted archive."
     fi
-    
+
     verbose "Archive decrypted successfully"
 }
 
@@ -759,7 +766,10 @@ main() {
     fi
     
     check_dependencies
-    prompt_password
+    
+    if [[ "$ENCRYPTION_CIPHER" != "none" ]]; then
+        prompt_password
+    fi
     
     # Create temporary files
     TEMP_DIR="$(mktemp -d)"
@@ -836,7 +846,8 @@ ARGUMENTS:
 OPTIONS:
   -c, --compress TYPE    Compression type (default: gzip)
                          Types: none, gzip, bzip2, xz, zstd
-  -p, --password PASS    Password for encryption (prompted if not provided)
+  -e, --encrypt          Enable encryption (AES-256-CBC)
+  -p, --password PASS    Password for encryption (implies -e)
   -o, --output FILE      Output filename
   -R, --recursive        Include a copy of bigshebang inside the archive
   -T, --self-test        Run internal self-diagnostic before archiving
@@ -880,8 +891,13 @@ parse_args() {
                 COMPRESS_TYPE="$2"
                 shift 2
                 ;;
+            -e|--encrypt)
+                ENCRYPT=1
+                shift
+                ;;
             -p|--password)
                 PASSWORD="$2"
+                ENCRYPT=1
                 shift 2
                 ;;
             -o|--output)
@@ -1035,9 +1051,14 @@ state_validate() {
         OUTPUT_FILE="$(pwd)/$OUTPUT_FILE"
     fi
     
-    # Prompt for password
-    if [[ -z "$PASSWORD" ]]; then
-        prompt_password
+    # Handle optional encryption
+    if [[ $ENCRYPT -eq 1 ]]; then
+        if [[ -z "$PASSWORD" ]]; then
+            prompt_password
+        fi
+    else
+        ENCRYPTION_CIPHER="none"
+        verbose "Encryption disabled: creating passwordless archive"
     fi
     
     transition_to "$STATE_CHRONICLE"
@@ -1149,6 +1170,14 @@ state_archive() {
 }
 
 state_encrypt() {
+    if [[ "$ENCRYPTION_CIPHER" == "none" ]]; then
+        info "Bypassing encryption..."
+        cp "$tar_file" "$encrypted_file"
+        HASH_ENCRYPTED=$(calculate_hash "$encrypted_file")
+        transition_to "$STATE_ASSEMBLE"
+        return
+    fi
+
     info "Encrypting archive..."
     encrypt_archive "$tar_file" "$encrypted_file"
     
@@ -1196,7 +1225,11 @@ state_finalize() {
     print_color blue "  Encrypted: $HASH_ENCRYPTED"
     print_color blue "  Final:     $HASH_FINAL"
     echo ""
-    print_color yellow "Keep your password safe - the cycle continues."
+    if [[ "$ENCRYPTION_CIPHER" != "none" ]]; then
+        print_color yellow "Keep your password safe - the cycle continues."
+    else
+        print_color green "Distribution vessel ready - the cycle continues."
+    fi
     echo ""
     
     transition_to "$STATE_CLEANUP"

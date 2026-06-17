@@ -1,0 +1,7 @@
+stress_workspace/
+*.sh
+!bigshebang
+!stress_test.sh
+!bigshebang-v7.23.secure.sh
+*.zip
+*.deb

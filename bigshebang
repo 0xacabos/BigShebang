@@ -1,0 +1,1153 @@
+#!/usr/bin/env bash
+#
+# ============================================================================
+# BIGSHEBANG - Secure Self-Extracting Archive Creator
+# ============================================================================
+#
+# Description:
+#   Creates a password-protected self-extracting shell script that contains
+#   an entire directory tree structure with all files, preserving data and
+#   metadata fidelity (permissions, timestamps, ownership, symlinks, xattrs).
+#
+# Usage:
+#   ./bigshebang.sh [OPTIONS] <source_directory> [output_file]
+#
+# Options:
+#   -c, --compress TYPE    Compression type: none, gzip, bzip2, xz, zstd (default: gzip)
+#   -p, --password PASS    Password for encryption (prompted if not provided)
+#   -o, --output FILE      Output filename (default: source_directory.secure.sh)
+#   -B, --no-banner        Suppress header and banner output
+#   -v, --verbose          Show verbose output
+#   -h, --help             Show this help message
+#
+# Requirements:
+#   - openssl (for AES-256-CBC encryption)
+#   - tar (for archiving)
+#   - base64 (for encoding)
+#   - file (for MIME detection, optional)
+#
+# Author: Secure Archive Utility
+# Version: 1.0.0
+# ============================================================================
+
+set -euo pipefail
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_VERSION="7.23"
+readonly ENCRYPTION_CIPHER="aes-256-cbc"
+readonly ENCRYPTION_DIGEST="sha512"
+readonly PBKDF2_ITERATIONS=100000
+
+# Compression extensions mapping
+declare -A COMPRESS_EXT=(
+    ["none"]=""
+    ["gzip"]=".gz"
+    ["bzip2"]=".bz2"
+    ["xz"]=".xz"
+    ["zstd"]=".zst"
+)
+
+# Compression tar flags mapping
+declare -A COMPRESS_TAR_FLAG=(
+    ["none"]=""
+    ["gzip"]="z"
+    ["bzip2"]="j"
+    ["xz"]="J"
+    ["zstd"]="--zstd"
+)
+
+# =============================================================================
+# GLOBAL VARIABLES
+# =============================================================================
+
+COMPRESS_TYPE="gzip"
+PASSWORD=""
+OUTPUT_FILE=""
+VERBOSE=0
+SOURCE_DIR=""
+NO_BANNER=0
+RECURSIVE=0
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+# Print colored output
+print_color() {
+    local color="$1"
+    local message="$2"
+    local reset="\033[0m"
+    
+    case "$color" in
+        red)     echo -e "\033[1;31m${message}${reset}" ;;
+        green)   echo -e "\033[1;32m${message}${reset}" ;;
+        yellow)  echo -e "\033[1;33m${message}${reset}" ;;
+        blue)    echo -e "\033[1;34m${message}${reset}" ;;
+        cyan)    echo -e "\033[1;36m${message}${reset}" ;;
+        *)       echo -e "${message}" ;;
+    esac
+}
+
+# Check if ANSI output is supported
+supports_ansi() {
+    [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]] && [[ -z "${NO_COLOR:-}" ]]
+}
+
+# Display header art
+display_header() {
+    local header_ansi="$SCRIPT_DIR/header.ans"
+    local header_ascii="$SCRIPT_DIR/header.asc"
+
+    if [[ -f "$header_ansi" ]] && supports_ansi; then
+        cat "$header_ansi"
+        echo ""
+        return
+    fi
+
+    if [[ -f "$header_ascii" ]]; then
+        cat "$header_ascii"
+        echo ""
+    fi
+}
+
+# Print error message and exit
+error() {
+    print_color red "ERROR: $1" >&2
+    exit "${2:-1}"
+}
+
+# Print warning message
+warn() {
+    print_color yellow "WARNING: $1" >&2
+}
+
+# Print info message
+info() {
+    print_color cyan "INFO: $1"
+}
+
+# Print verbose message
+verbose() {
+    if [[ "${VERBOSE:-0}" -eq 1 ]]; then
+        print_color blue "VERBOSE: $1"
+    fi
+}
+
+# Print success message
+success() {
+    print_color green "SUCCESS: $1"
+}
+
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Calculate SHA-256 hash of a file
+calculate_hash() {
+    sha256sum "$1" | cut -d' ' -f1
+}
+
+# Get file size in human-readable format (pure bash, no bc dependency)
+human_readable_size() {
+    local bytes="$1"
+    local units=("B" "KB" "MB" "GB" "TB")
+    local unit=0
+    local size="$bytes"
+    
+    # Use integer arithmetic for comparison and division
+    while [[ $size -ge 1024 ]] && [[ $unit -lt 4 ]]; do
+        size=$((size / 1024))
+        ((unit++))
+    done
+    
+    # For display, add decimal if not bytes
+    if [[ $unit -eq 0 ]]; then
+        printf "%d %s" "$size" "${units[$unit]}"
+    else
+        # Recalculate with more precision for display
+        local precise_size="$bytes"
+        local i=0
+        while [[ $i -lt $unit ]]; do
+            local next_size=$((precise_size / 1024))
+            ((i++))
+            precise_size="$next_size"
+        done
+        printf "%d %s" "$precise_size" "${units[$unit]}"
+    fi
+}
+
+# =============================================================================
+# VALIDATION FUNCTIONS
+# =============================================================================
+
+# Check required dependencies
+check_dependencies() {
+    local missing=()
+    
+    # Essential tools
+    for cmd in openssl tar base64; do
+        if ! command_exists "$cmd"; then
+            missing+=("$cmd")
+        fi
+    done
+    
+    # Check compression tool if not 'none'
+    if [[ "$COMPRESS_TYPE" != "none" ]]; then
+        case "$COMPRESS_TYPE" in
+            gzip)   command_exists gzip || missing+=("gzip") ;;
+            bzip2)  command_exists bzip2 || missing+=("bzip2") ;;
+            xz)     command_exists xz || missing+=("xz") ;;
+            zstd)   command_exists zstd || missing+=("zstd") ;;
+        esac
+    fi
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing required dependencies: ${missing[*]}\nPlease install them and try again."
+    fi
+    
+    verbose "All dependencies satisfied"
+}
+
+# Validate source directory
+validate_source_directory() {
+    if [[ -z "$SOURCE_DIR" ]]; then
+        error "No source directory specified"
+    fi
+    
+    if [[ ! -e "$SOURCE_DIR" ]]; then
+        error "Source path does not exist: $SOURCE_DIR"
+    fi
+    
+    if [[ ! -d "$SOURCE_DIR" ]]; then
+        error "Source path is not a directory: $SOURCE_DIR"
+    fi
+    
+    if [[ ! -r "$SOURCE_DIR" ]]; then
+        error "Source directory is not readable: $SOURCE_DIR"
+    fi
+    
+    # Get absolute path
+    SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+    
+    verbose "Source directory validated: $SOURCE_DIR"
+}
+
+# Validate compression type
+validate_compress_type() {
+    if [[ ! -v "COMPRESS_EXT[$COMPRESS_TYPE]" ]]; then
+        error "Invalid compression type: $COMPRESS_TYPE\nValid types: none, gzip, bzip2, xz, zstd"
+    fi
+}
+
+# =============================================================================
+# PASSWORD HANDLING
+# =============================================================================
+
+# Prompt for password securely
+prompt_password() {
+    local password1 password2
+    
+    echo ""
+    print_color yellow "Enter password for archive encryption:"
+    read -s -r password1
+    echo ""
+    
+    if [[ -z "$password1" ]]; then
+        error "Password cannot be empty"
+    fi
+    
+    print_color yellow "Confirm password:"
+    read -s -r password2
+    echo ""
+    
+    if [[ "$password1" != "$password2" ]]; then
+        error "Passwords do not match"
+    fi
+    
+    PASSWORD="$password1"
+}
+
+# =============================================================================
+# ARCHIVE CREATION
+# =============================================================================
+
+# Create tar archive with full metadata preservation
+create_tar_archive() {
+    local source="$1"
+    local output="$2"
+    local temp_work_dir="$3"
+    
+    verbose "Creating tar archive with compression: $COMPRESS_TYPE"
+    
+    # Build tar command with appropriate flags
+    local tar_flags="cf"
+    
+    # Add compression flag
+    if [[ "$COMPRESS_TYPE" != "none" ]]; then
+        local comp_flag="${COMPRESS_TAR_FLAG[$COMPRESS_TYPE]}"
+        if [[ "$comp_flag" == --* ]]; then
+            # Long option (zstd)
+            tar_flags="cf"
+        else
+            # Short option
+            tar_flags="${comp_flag}cf"
+        fi
+    fi
+    
+    # Determine tar variant for metadata preservation
+    local metadata_flags=""
+    if tar --version 2>/dev/null | grep -q "GNU"; then
+        # GNU tar - full metadata preservation
+        metadata_flags="--acls --xattrs --selinux --numeric-owner"
+        verbose "Using GNU tar with extended metadata support"
+    else
+        # BSD tar (macOS) - basic metadata preservation
+        metadata_flags=""
+        verbose "Using BSD tar (basic metadata support)"
+    fi
+    
+    # Get parent directory and directory name
+    local parent_dir="$(dirname "$source")"
+    local dir_name="$(basename "$source")"
+    
+    # Handle recursive embedding (include a copy of bigshebang itself)
+    local tar_cmd_extras=()
+    if [[ ${RECURSIVE:-0} -eq 1 ]]; then
+        info "Embedding extractor for recursive capability..."
+        cp "$0" "$temp_work_dir/bigshebang"
+        chmod +x "$temp_work_dir/bigshebang"
+        # We use -C to include the file from the temp dir
+        tar_cmd_extras=("-C" "$temp_work_dir" "bigshebang")
+    fi
+
+    # Create the archive
+    verbose "Tar flags: $tar_flags $metadata_flags"
+    
+    if [[ "$COMPRESS_TYPE" == "zstd" ]]; then
+        # Special handling for zstd
+        (cd "$parent_dir" && tar cf - $metadata_flags "$dir_name" "${tar_cmd_extras[@]}" | zstd -19 -o "$output" 2>/dev/null)
+    else
+        (cd "$parent_dir" && tar ${tar_flags} "$output" $metadata_flags "$dir_name" "${tar_cmd_extras[@]}" 2>/dev/null)
+    fi
+    
+    if [[ ! -f "$output" ]]; then
+        error "Failed to create tar archive"
+    fi
+    
+    verbose "Tar archive created: $output"
+}
+
+# Encrypt archive with password
+encrypt_archive() {
+    local input="$1"
+    local output="$2"
+    
+    verbose "Encrypting archive with $ENCRYPTION_CIPHER"
+    
+    # Use OpenSSL with PBKDF2 for strong key derivation
+    # -pbkdf2: Use PBKDF2 key derivation
+    # -iter: Number of iterations for PBKDF2
+    # -salt: Use salt (implicit with PBKDF2)
+    # -md: Message digest for key derivation
+    
+    if ! openssl enc -"$ENCRYPTION_CIPHER" \
+        -pbkdf2 \
+        -iter "$PBKDF2_ITERATIONS" \
+        -md "$ENCRYPTION_DIGEST" \
+        -salt \
+        -in "$input" \
+        -out "$output" \
+        -pass "pass:$PASSWORD" 2>/dev/null; then
+        error "Encryption failed. Check that OpenSSL supports $ENCRYPTION_CIPHER"
+    fi
+    
+    if [[ ! -f "$output" ]]; then
+        error "Failed to create encrypted archive"
+    fi
+    
+    verbose "Archive encrypted: $output"
+}
+
+# =============================================================================
+# SELF-EXTRACTING SCRIPT GENERATION
+# =============================================================================
+
+# Generate the self-extracting script
+generate_self_extractor() {
+    local payload_file="$1"
+    local output="$2"
+    local source_name="$(basename "$SOURCE_DIR")"
+    local compression="$COMPRESS_TYPE"
+    local archive_ext="${COMPRESS_EXT[$COMPRESS_TYPE]}"
+    
+    # Check for file_id.diz (ANSI banner)
+    local banner_data=""
+    if [[ -f "$SOURCE_DIR/file_id.diz" ]]; then
+        verbose "Found file_id.diz, embedding as banner"
+        banner_data=$(base64 -w 0 < "$SOURCE_DIR/file_id.diz")
+    fi
+    
+    verbose "Generating self-extracting script"
+    
+    # Calculate checksum for integrity verification
+    local payload_sha256="$(sha256sum "$payload_file" | cut -d' ' -f1)"
+    local payload_size="$(wc -c < "$payload_file")"
+    
+    # Get tar variant for extraction
+    local tar_extract_flags=""
+    if [[ "$compression" != "none" ]]; then
+        local comp_flag="${COMPRESS_TAR_FLAG[$compression]}"
+        if [[ "$comp_flag" == --* ]]; then
+            tar_extract_flags="--use-compress-program=zstd"
+        else
+            tar_extract_flags="${comp_flag}"
+        fi
+    fi
+    
+    cat > "$output" << 'HEADER_EOF'
+#!/usr/bin/env bash
+#
+# ============================================================================
+# SECURE SELF-EXTRACTING ARCHIVE
+# ============================================================================
+#
+# This is a password-protected self-extracting archive.
+# Run this script and enter the password to extract the contents.
+#
+# Usage:
+#   ./archive.sh [OPTIONS]
+#
+# Options:
+#   -d, --directory DIR    Extract to specified directory (default: current)
+#   -p, --password PASS    Provide password on command line (less secure)
+#   -P, --no-prompt        Do not prompt; error if password missing
+#   -l, --list             List archive contents without extracting
+#   -v, --verbose          Show verbose output
+#   -h, --help             Show this help message
+#
+# Security Note:
+#   This archive uses AES-256-CBC encryption with PBKDF2 key derivation.
+#   Keep your password safe - there is no way to recover the data without it.
+#
+# ============================================================================
+
+set -euo pipefail
+
+# Archive metadata (populated during creation)
+HEADER_EOF
+
+    # Add metadata
+    cat >> "$output" << METADATA_EOF
+ARCHIVE_NAME="${source_name}"
+COMPRESSION_TYPE="${compression}"
+COMPRESSION_EXT="${archive_ext}"
+PAYLOAD_SIZE="${payload_size}"
+PAYLOAD_SHA256="${payload_sha256}"
+TAR_EXTRACT_FLAGS="${tar_extract_flags}"
+ENCRYPTION_CIPHER="${ENCRYPTION_CIPHER}"
+PBKDF2_ITERATIONS="${PBKDF2_ITERATIONS}"
+ENCRYPTION_DIGEST="${ENCRYPTION_DIGEST}"
+BANNER_DATA="${banner_data}"
+METADATA_EOF
+
+    # Add the main extraction script
+    cat >> "$output" << 'EXTRACTOR_EOF'
+
+# =============================================================================
+# EXTRACTION SCRIPT
+# =============================================================================
+
+# Colors for output
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+CYAN='\033[1;36m'
+NC='\033[0m' # No Color
+
+# Global variables
+EXTRACT_DIR="."
+PASSWORD=""
+LIST_ONLY=0
+VERBOSE=0
+NO_PROMPT=0
+NO_BANNER=0
+TEMP_DIR=""
+
+# Print functions
+error() { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
+warn() { echo -e "${YELLOW}WARNING: $1${NC}" >&2; }
+info() { echo -e "${CYAN}INFO: $1${NC}"; }
+success() { echo -e "${GREEN}SUCCESS: $1${NC}"; }
+verbose() {
+    if [[ "${VERBOSE:-0}" -eq 1 ]]; then
+        echo -e "${BLUE}VERBOSE: $1${NC}"
+    fi
+}
+
+# Show help
+show_help() {
+    cat << HELP
+BigShebang Archive: ${ARCHIVE_NAME}
+
+Usage: $0 [OPTIONS]
+
+Options:
+  -d, --directory DIR    Extract to specified directory (default: current)
+  -p, --password PASS    Provide password on command line (less secure)
+  -P, --no-prompt        Do not prompt; error if password missing
+  -B, --no-banner        Suppress header output
+  -l, --list             List archive contents without extracting
+  -v, --verbose          Show verbose output
+  -h, --help             Show this help message
+
+Archive Information:
+  Compression: ${COMPRESSION_TYPE}
+  Encryption: ${ENCRYPTION_CIPHER} with PBKDF2 (${PBKDF2_ITERATIONS} iterations)
+  
+HELP
+    exit 0
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--directory)
+                EXTRACT_DIR="$2"
+                shift 2
+                ;;
+            -p|--password)
+                PASSWORD="$2"
+                shift 2
+                ;;
+            -l|--list)
+                LIST_ONLY=1
+                shift
+                ;;
+            -P|--no-prompt)
+                NO_PROMPT=1
+                shift
+                ;;
+            -B|--no-banner)
+                NO_BANNER=1
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -h|--help)
+                if [[ $NO_BANNER -eq 0 ]]; then
+                    display_header
+                fi
+                show_help
+                ;;
+            *)
+                error "Unknown option: $1\nUse -h for help"
+                ;;
+        esac
+    done
+}
+
+# Check dependencies
+check_dependencies() {
+    local missing=()
+    for cmd in openssl tar awk; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing required dependencies: ${missing[*]}"
+    fi
+}
+
+# Prompt for password
+prompt_password() {
+    if [[ -z "$PASSWORD" ]]; then
+        if [[ $NO_PROMPT -eq 1 ]]; then
+            error "Password required (use -p/--password)"
+        fi
+        echo -e "${YELLOW}Enter password to decrypt archive:${NC}"
+        read -s -r PASSWORD
+        echo ""
+
+        if [[ -z "$PASSWORD" ]]; then
+            error "Password cannot be empty"
+        fi
+    fi
+}
+
+# Extract and verify payload
+extract_payload() {
+    local temp_file="$1"
+    local m_part1="__ARCHIVE"
+    local m_part2="_BELOW__"
+    local marker="${m_part1}${m_part2}"
+
+    # Find the byte offset of the marker
+    # We use a subshell and head -n 1 to get the first marker after the code
+    local offset=$(grep -aob "$marker" "$0" | { head -n 1; cat >/dev/null; } | cut -d: -f1 || true)
+    
+    if [[ -z "$offset" ]]; then
+        error "Failed to locate archive payload marker"
+    fi
+
+    # The payload starts after the marker and its newline
+    local start_byte=$((offset + ${#marker} + 1))
+    
+    # Extract binary payload
+    if ! tail -c +$((start_byte + 1)) "$0" > "$temp_file"; then
+        error "Failed to extract payload"
+    fi
+    
+    # Verify size
+    local actual_size="$(wc -c < "$temp_file")"
+    if [[ "$actual_size" != "$PAYLOAD_SIZE" ]]; then
+        error "Payload size mismatch (expected: $PAYLOAD_SIZE, got: $actual_size)"
+    fi
+    
+    # Verify checksum
+    local actual_sha256="$(sha256sum "$temp_file" | cut -d' ' -f1)"
+    if [[ "$actual_sha256" != "$PAYLOAD_SHA256" ]]; then
+        error "Payload integrity check failed!\nExpected: $PAYLOAD_SHA256\nGot: $actual_sha256"
+    fi
+    
+    verbose "Payload verified successfully"
+}
+
+# Decrypt archive
+decrypt_archive() {
+    local input="$1"
+    local output="$2"
+    
+    verbose "Decrypting archive with $ENCRYPTION_CIPHER"
+    
+    if ! openssl enc -d -"$ENCRYPTION_CIPHER" \
+        -pbkdf2 \
+        -iter "$PBKDF2_ITERATIONS" \
+        -md "$ENCRYPTION_DIGEST" \
+        -in "$input" \
+        -out "$output" \
+        -pass "pass:$PASSWORD" 2>/dev/null; then
+        error "Decryption failed. Incorrect password or corrupted archive."
+    fi
+    
+    verbose "Archive decrypted successfully"
+}
+
+# List archive contents
+list_archive() {
+    local archive="$1"
+    
+    echo -e "\n${CYAN}Archive Contents:${NC}"
+    echo "============================================="
+    
+    # Build tar list command
+    local tar_cmd="tar tf"
+    if [[ -n "$TAR_EXTRACT_FLAGS" ]]; then
+        if [[ "$TAR_EXTRACT_FLAGS" == --* ]]; then
+            tar_cmd="tar $TAR_EXTRACT_FLAGS -tf"
+        else
+            tar_cmd="tar ${TAR_EXTRACT_FLAGS}tf"
+        fi
+    fi
+    
+    eval "$tar_cmd \"$archive\"" 2>/dev/null | while read -r line; do
+        echo "  $line"
+    done
+    
+    echo "============================================="
+}
+
+# Extract archive
+extract_archive() {
+    local archive="$1"
+    local dest="$2"
+    
+    # Create destination directory if needed
+    if [[ "$dest" != "." ]]; then
+        mkdir -p "$dest"
+    fi
+    
+    echo -e "\n${CYAN}Extracting to: $dest${NC}"
+    
+    # Check for GNU tar for extended attributes
+    local has_gnu_tar=0
+    if tar --version 2>/dev/null | grep -q "GNU"; then
+        has_gnu_tar=1
+    fi
+    
+    # Build and execute tar extract command
+    verbose "Extracting with compression: ${TAR_EXTRACT_FLAGS:-none}"
+    
+    # Extract based on compression type and tar version
+    # Note: With GNU tar, extended attribute flags must come before operation flags
+    if [[ -n "$TAR_EXTRACT_FLAGS" ]]; then
+        if [[ "$TAR_EXTRACT_FLAGS" == --* ]]; then
+            # Long option (zstd) - use as separate flag
+            if [[ $has_gnu_tar -eq 1 ]]; then
+                (cd "$dest" && tar --acls --xattrs --selinux $TAR_EXTRACT_FLAGS -xf "$archive")
+            else
+                (cd "$dest" && tar $TAR_EXTRACT_FLAGS -xf "$archive")
+            fi
+        else
+            # Short option (z/j/J)
+            if [[ $has_gnu_tar -eq 1 ]]; then
+                (cd "$dest" && tar --acls --xattrs --selinux -${TAR_EXTRACT_FLAGS}xf "$archive")
+            else
+                (cd "$dest" && tar -${TAR_EXTRACT_FLAGS}xf "$archive")
+            fi
+        fi
+    else
+        # No compression
+        if [[ $has_gnu_tar -eq 1 ]]; then
+            (cd "$dest" && tar --acls --xattrs --selinux -xf "$archive")
+        else
+            (cd "$dest" && tar -xf "$archive")
+        fi
+    fi
+    
+    success "Archive extracted successfully to: $dest"
+}
+
+# Display header art
+display_header() {
+    if [[ -n "${BANNER_DATA:-}" ]]; then
+        echo "$BANNER_DATA" | base64 -d
+        echo ""
+    else
+        echo -e "${CYAN}========================================${NC}"
+        echo -e "${CYAN}  BigShebang Archive${NC}"
+        echo -e "${CYAN}  Archive: ${ARCHIVE_NAME}${NC}"
+        echo -e "${CYAN}========================================${NC}"
+        echo ""
+    fi
+}
+
+# Main function
+main() {
+    echo ""
+    if [[ $NO_BANNER -eq 0 ]]; then
+        display_header
+    fi
+    
+    parse_args "$@"
+    check_dependencies
+    prompt_password
+    
+    # Create temporary files
+    TEMP_DIR="$(mktemp -d)"
+    local payload_file="$TEMP_DIR/payload.enc"
+    local archive_file="$TEMP_DIR/archive.tar${COMPRESSION_EXT}"
+    
+    # Cleanup on exit
+    cleanup() {
+        rm -rf "$TEMP_DIR"
+    }
+    trap cleanup EXIT
+    
+    # Extract payload
+    info "Extracting payload..."
+    extract_payload "$payload_file"
+    
+    # Decrypt
+    info "Decrypting archive..."
+    decrypt_archive "$payload_file" "$archive_file"
+    
+    if [[ $LIST_ONLY -eq 1 ]]; then
+        list_archive "$archive_file"
+    else
+        extract_archive "$archive_file" "$EXTRACT_DIR"
+    fi
+    
+    # Clear trap and cleanup manually to avoid scope issues
+    trap - EXIT
+    rm -rf "$TEMP_DIR"
+}
+
+# Run main
+main "$@"
+
+exit 0
+
+# =============================================================================
+# PAYLOAD MARKER - Everything after this line is the binary archive
+# =============================================================================
+
+__ARCHIVE_BELOW__
+EXTRACTOR_EOF
+
+    # Append the raw binary payload
+    cat "$payload_file" >> "$output"
+    
+    # Make executable
+    chmod +x "$output"
+    
+    verbose "Self-extracting script created: $output"
+}
+
+# =============================================================================
+# HELP AND USAGE
+# =============================================================================
+
+# Show help message
+show_help() {
+    cat << HELP
+$SCRIPT_NAME v$SCRIPT_VERSION - BigShebang Secure Self-Extracting Archive Creator
+
+DESCRIPTION:
+  Creates a password-protected self-extracting shell script that contains
+  an entire directory tree structure with all files, preserving data and
+  metadata fidelity (permissions, timestamps, ownership, symlinks, xattrs).
+
+USAGE:
+  $SCRIPT_NAME [OPTIONS] <source_directory> [output_file]
+
+ARGUMENTS:
+  source_directory    Directory to archive
+  output_file         Output filename (optional, default: source.secure.sh)
+
+OPTIONS:
+  -c, --compress TYPE    Compression type (default: gzip)
+                         Types: none, gzip, bzip2, xz, zstd
+  -p, --password PASS    Password for encryption (prompted if not provided)
+  -o, --output FILE      Output filename
+  -R, --recursive        Include a copy of bigshebang inside the archive
+  -T, --self-test        Run internal self-diagnostic before archiving
+  -B, --no-banner        Suppress header and banner output
+  -v, --verbose          Show verbose output
+  -h, --help             Show this help message
+
+EXAMPLES:
+  # Create archive with a self-diagnostic pre-flight check
+  $SCRIPT_NAME -T /path/to/directory
+
+  # Create archive with password on command line (less secure)
+  $SCRIPT_NAME -p "secret123" /path/to/directory
+
+  # Create uncompressed archive (fastest, largest)
+  $SCRIPT_NAME -c none /path/to/directory
+
+SECURITY:
+  - Encryption: AES-256-CBC
+  - Key Derivation: PBKDF2 with SHA-512
+  - Iterations: $PBKDF2_ITERATIONS
+  
+  The password is NOT stored in the archive. Data cannot be recovered
+  without the correct password.
+
+REQUIREMENTS:
+  - openssl (for AES-256-CBC encryption)
+  - tar (for archiving)
+  - base64 (for encoding)
+  - Compression tool matching selected type (gzip/bzip2/xz/zstd)
+
+HELP
+    exit 0
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c|--compress)
+                COMPRESS_TYPE="$2"
+                shift 2
+                ;;
+            -p|--password)
+                PASSWORD="$2"
+                shift 2
+                ;;
+            -o|--output)
+                OUTPUT_FILE="$2"
+                shift 2
+                ;;
+            -R|--recursive)
+                RECURSIVE=1
+                shift
+                ;;
+            -T|--self-test)
+                SELF_TEST=1
+                shift
+                ;;
+            -B|--no-banner)
+                NO_BANNER=1
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -h|--help)
+                if [[ $NO_BANNER -eq 0 ]]; then
+                    display_header
+                fi
+                show_help
+                ;;
+            -*)
+                error "Unknown option: $1\nUse -h for help"
+                ;;
+            *)
+                if [[ -z "$SOURCE_DIR" ]]; then
+                    SOURCE_DIR="$1"
+                elif [[ -z "$OUTPUT_FILE" ]]; then
+                    OUTPUT_FILE="$1"
+                else
+                    error "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+}
+
+# =============================================================================
+# STATE MACHINE ENGINE
+# =============================================================================
+
+# State constants
+readonly STATE_INIT="INIT"
+readonly STATE_TEST="TEST"
+readonly STATE_VALIDATE="VALIDATE"
+readonly STATE_PREPARE="PREPARE"
+readonly STATE_ARCHIVE="ARCHIVE"
+readonly STATE_ENCRYPT="ENCRYPT"
+readonly STATE_ASSEMBLE="ASSEMBLE"
+readonly STATE_FINALIZE="FINALIZE"
+readonly STATE_CLEANUP="CLEANUP"
+readonly STATE_EXIT="EXIT"
+
+# Global state tracking
+CURRENT_STATE="$STATE_INIT"
+PREVIOUS_STATE=""
+EXIT_CODE=0
+SELF_TEST=0
+
+# Provenance Chain
+HASH_ARCHIVE=""
+HASH_ENCRYPTED=""
+HASH_FINAL=""
+
+# State transitions
+transition_to() {
+    PREVIOUS_STATE="$CURRENT_STATE"
+    CURRENT_STATE="$1"
+    verbose "Transitioning state: $PREVIOUS_STATE -> $CURRENT_STATE"
+}
+
+# State: Initialization and Header
+state_init() {
+    echo ""
+    if [[ $NO_BANNER -eq 0 ]]; then
+        display_header
+        print_color cyan "========================================"
+        print_color cyan "  BigShebang Secure Self-Extracting Automaton"
+        print_color cyan "  Version: $SCRIPT_VERSION"
+        print_color cyan "========================================"
+        echo ""
+    fi
+    transition_to "$STATE_TEST"
+}
+
+# State: Self-Diagnostic Test
+state_test() {
+    if [[ $SELF_TEST -eq 1 ]]; then
+        info "Initiating internal self-diagnostic protocol..."
+        
+        local test_root
+        test_root="$(mktemp -d)"
+        local test_source="$test_root/source"
+        local test_output="$test_root/test.sh"
+        local test_extract="$test_root/extracted"
+        local test_pass="DiagnosticPass123!"
+        
+        mkdir -p "$test_source" "$test_extract"
+        echo "DIAGNOSTIC_DATA_$(date +%s)" > "$test_source/diagnostic.txt"
+        
+        # Internal cycle: Archive -> Encrypt -> Assemble
+        local t_tar="$test_root/test.tar.gz"
+        local t_enc="$test_root/test.enc"
+        
+        create_tar_archive "$test_source" "$t_tar" "$test_root" >/dev/null 2>&1
+        PASSWORD="$test_pass" encrypt_archive "$t_tar" "$t_enc" >/dev/null 2>&1
+        generate_self_extractor "$t_enc" "$test_output" >/dev/null 2>&1
+        
+        # Verify
+        if ! "$test_output" -p "$test_pass" -d "$test_extract" -B >/dev/null 2>&1; then
+            rm -rf "$test_root"
+            error "Self-diagnostic failure: Extraction protocol compromised."
+        fi
+        
+        if ! diff -r "$test_source" "$test_extract/source" >/dev/null 2>&1; then
+            rm -rf "$test_root"
+            error "Self-diagnostic failure: Data integrity violation."
+        fi
+        
+        rm -rf "$test_root"
+        success "Internal self-diagnostic: Protocol integrity verified."
+    fi
+    transition_to "$STATE_VALIDATE"
+}
+
+# State: Input Validation
+state_validate() {
+    validate_compress_type
+    check_dependencies
+    validate_source_directory
+    
+    # Set default output file if not specified
+    if [[ -z "$OUTPUT_FILE" ]]; then
+        OUTPUT_FILE="$(basename "$SOURCE_DIR").secure.sh"
+    fi
+    
+    # Make output path absolute
+    if [[ "$OUTPUT_FILE" != /* ]]; then
+        OUTPUT_FILE="$(pwd)/$OUTPUT_FILE"
+    fi
+    
+    # Prompt for password
+    if [[ -z "$PASSWORD" ]]; then
+        prompt_password
+    fi
+    
+    transition_to "$STATE_PREPARE"
+}
+
+# State: Prepare Environment
+state_prepare() {
+    # Create temporary working directory
+    temp_dir="$(mktemp -d)"
+    tar_file="$temp_dir/archive.tar${COMPRESS_EXT[$COMPRESS_TYPE]}"
+    encrypted_file="$temp_dir/archive.enc"
+    
+    # Get original directory size
+    original_size="$(du -sb "$SOURCE_DIR" 2>/dev/null | cut -f1)"
+    info "Source directory size: $(human_readable_size "$original_size")"
+    
+    transition_to "$STATE_ARCHIVE"
+}
+
+# State Machine Dispatcher
+run_automaton() {
+    trap 'transition_to "$STATE_CLEANUP"' EXIT INT TERM
+    
+    while [[ "$CURRENT_STATE" != "$STATE_EXIT" ]]; do
+        case "$CURRENT_STATE" in
+            "$STATE_INIT")     state_init ;;
+            "$STATE_TEST")     state_test ;;
+            "$STATE_VALIDATE") state_validate ;;
+            "$STATE_PREPARE")   state_prepare ;;
+            "$STATE_ARCHIVE")  state_archive ;;
+            "$STATE_ENCRYPT")  state_encrypt ;;
+            "$STATE_ASSEMBLE") state_assemble ;;
+            "$STATE_FINALIZE") state_finalize ;;
+            "$STATE_CLEANUP")  state_cleanup ;;
+            *) error "Unknown state: $CURRENT_STATE" ;;
+        esac
+    done
+}
+
+# =============================================================================
+# MAIN FUNCTION (Entry Point)
+# =============================================================================
+
+main() {
+    run_automaton
+}
+
+# =============================================================================
+# STATE ACTION FUNCTIONS
+# =============================================================================
+
+state_archive() {
+    info "Creating archive..."
+    create_tar_archive "$SOURCE_DIR" "$tar_file" "$temp_dir"
+    
+    HASH_ARCHIVE=$(calculate_hash "$tar_file")
+    verbose "Archive Hash: $HASH_ARCHIVE"
+    
+    local tar_size="$(wc -c < "$tar_file")"
+    info "Archive size: $(human_readable_size "$tar_size")"
+    
+    transition_to "$STATE_ENCRYPT"
+}
+
+state_encrypt() {
+    info "Encrypting archive..."
+    encrypt_archive "$tar_file" "$encrypted_file"
+    
+    HASH_ENCRYPTED=$(calculate_hash "$encrypted_file")
+    verbose "Encrypted Hash: $HASH_ENCRYPTED"
+    
+    local encrypted_size="$(wc -c < "$encrypted_file")"
+    info "Encrypted size: $(human_readable_size "$encrypted_size")"
+    
+    transition_to "$STATE_ASSEMBLE"
+}
+
+state_assemble() {
+    info "Generating self-extracting script..."
+    generate_self_extractor "$encrypted_file" "$OUTPUT_FILE"
+    
+    HASH_FINAL=$(calculate_hash "$OUTPUT_FILE")
+    verbose "Final Script Hash: $HASH_FINAL"
+    
+    local final_size="$(wc -c < "$OUTPUT_FILE")"
+    transition_to "$STATE_FINALIZE"
+}
+
+state_finalize() {
+    local final_size="$(wc -c < "$OUTPUT_FILE")"
+    
+    # Summary
+    echo ""
+    print_color green "========================================"
+    print_color green "  Automaton Execution Complete!"
+    print_color green "========================================"
+    echo ""
+    print_color cyan "Source:          $SOURCE_DIR"
+    print_color cyan "Output:          $OUTPUT_FILE"
+    print_color cyan "Compression:     $COMPRESS_TYPE"
+    print_color cyan "Encryption:      $ENCRYPTION_CIPHER"
+    echo ""
+    print_color cyan "Original size:   $(human_readable_size "$original_size")"
+    print_color cyan "Final size:      $(human_readable_size "$final_size")"
+    local ratio=$((final_size * 100 / original_size))
+    print_color cyan "Size ratio:      ${ratio}%"
+    echo ""
+    print_color yellow "Provenance Chain (SHA-256):"
+    print_color blue "  Archive:   $HASH_ARCHIVE"
+    print_color blue "  Encrypted: $HASH_ENCRYPTED"
+    print_color blue "  Final:     $HASH_FINAL"
+    echo ""
+    print_color yellow "Keep your password safe - the cycle continues."
+    echo ""
+    
+    transition_to "$STATE_CLEANUP"
+}
+
+state_cleanup() {
+    verbose "Performing final state cleanup..."
+    if [[ -d "${temp_dir:-}" ]]; then
+        rm -rf "$temp_dir"
+    fi
+    trap - EXIT INT TERM
+    transition_to "$STATE_EXIT"
+}
+
+# =============================================================================
+# SCRIPT ENTRY POINT
+# =============================================================================
+
+# Parse arguments
+parse_args "$@"
+
+# Run main
+main

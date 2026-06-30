@@ -29,7 +29,7 @@
 #   - file (for MIME detection, optional)
 #
 # Author: Secure Archive Utility
-# Version: 1.0.0
+# Version: 0.5
 # ============================================================================
 
 set -euo pipefail
@@ -38,9 +38,10 @@ set -euo pipefail
 # CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_VERSION="7.23"
+readonly SCRIPT_VERSION="0.5"
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_NAME SCRIPT_DIR
 ENCRYPTION_CIPHER="aes-256-cbc"
 readonly ENCRYPTION_DIGEST="sha512"
 readonly PBKDF2_ITERATIONS=100000
@@ -75,6 +76,8 @@ VERBOSE=0
 SOURCE_DIR=""
 NO_BANNER=0
 RECURSIVE=0
+SIGN_KEY=""
+PROVENANCE_MODE=0
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -303,22 +306,23 @@ create_tar_archive() {
         fi
     fi
     
-    # Determine tar variant for metadata preservation
-    local metadata_flags=""
+    # Determine tar variant for metadata preservation (array so multi-flag
+    # GNU options expand safely without relying on word splitting).
+    local metadata_flags=()
     if tar --version 2>/dev/null | grep -q "GNU"; then
         # GNU tar - full metadata preservation
-        metadata_flags="--acls --xattrs --selinux --numeric-owner"
+        metadata_flags=(--acls --xattrs --selinux --numeric-owner)
         verbose "Using GNU tar with extended metadata support"
     else
         # BSD tar (macOS) - basic metadata preservation
-        metadata_flags=""
         verbose "Using BSD tar (basic metadata support)"
     fi
-    
+
     # Get parent directory and directory name
-    local parent_dir="$(dirname "$source")"
-    local dir_name="$(basename "$source")"
-    
+    local parent_dir dir_name
+    parent_dir="$(dirname "$source")"
+    dir_name="$(basename "$source")"
+
     # Handle recursive embedding (include a copy of bigshebang itself)
     local tar_cmd_extras=()
     if [[ ${RECURSIVE:-0} -eq 1 ]]; then
@@ -330,13 +334,13 @@ create_tar_archive() {
     fi
 
     # Create the archive
-    verbose "Tar flags: $tar_flags $metadata_flags"
-    
+    verbose "Tar flags: $tar_flags ${metadata_flags[*]-}"
+
     if [[ "$COMPRESS_TYPE" == "zstd" ]]; then
-        # Special handling for zstd
-        (cd "$parent_dir" && tar cf - $metadata_flags "$dir_name" "${tar_cmd_extras[@]}" | zstd -19 -o "$output" 2>/dev/null)
+        # Special handling for zstd (compress flag applied via the pipe)
+        (cd "$parent_dir" && tar cf - "${metadata_flags[@]}" "$dir_name" "${tar_cmd_extras[@]}" | zstd -19 -o "$output" 2>/dev/null)
     else
-        (cd "$parent_dir" && tar ${tar_flags} "$output" $metadata_flags "$dir_name" "${tar_cmd_extras[@]}" 2>/dev/null)
+        (cd "$parent_dir" && tar "$tar_flags" "$output" "${metadata_flags[@]}" "$dir_name" "${tar_cmd_extras[@]}" 2>/dev/null)
     fi
     
     if [[ ! -f "$output" ]]; then
@@ -385,22 +389,24 @@ encrypt_archive() {
 generate_self_extractor() {
     local payload_file="$1"
     local output="$2"
-    local source_name="$(basename "$SOURCE_DIR")"
+    local source_name
+    source_name="$(basename "$SOURCE_DIR")"
     local compression="$COMPRESS_TYPE"
     local archive_ext="${COMPRESS_EXT[$COMPRESS_TYPE]}"
-    
+
     # Check for file_id.diz (ANSI banner)
     local banner_data=""
     if [[ -f "$SOURCE_DIR/file_id.diz" ]]; then
         verbose "Found file_id.diz, embedding as banner"
         banner_data=$(base64 -w 0 < "$SOURCE_DIR/file_id.diz")
     fi
-    
+
     verbose "Generating self-extracting script"
-    
+
     # Calculate checksum for integrity verification
-    local payload_sha256="$(sha256sum "$payload_file" | cut -d' ' -f1)"
-    local payload_size="$(wc -c < "$payload_file")"
+    local payload_sha256 payload_size
+    payload_sha256="$(sha256sum "$payload_file" | cut -d' ' -f1)"
+    payload_size="$(wc -c < "$payload_file")"
     
     # Get tar variant for extraction
     local tar_extract_flags=""
@@ -413,7 +419,10 @@ generate_self_extractor() {
         fi
     fi
     
-    cat > "$output" << 'HEADER_EOF'
+    # Emit the vessel in three stages (header, metadata, extractor) via a
+    # single redirection, then append the raw binary payload below.
+    {
+        cat << 'HEADER_EOF'
 #!/usr/bin/env bash
 #
 # ============================================================================
@@ -446,8 +455,8 @@ set -euo pipefail
 # Archive metadata (populated during creation)
 HEADER_EOF
 
-    # Add metadata
-    cat >> "$output" << METADATA_EOF
+        # Add metadata
+        cat << METADATA_EOF
 ARCHIVE_NAME="${source_name}"
 COMPRESSION_TYPE="${compression}"
 COMPRESSION_EXT="${archive_ext}"
@@ -459,10 +468,11 @@ PBKDF2_ITERATIONS="${PBKDF2_ITERATIONS}"
 ENCRYPTION_DIGEST="${ENCRYPTION_DIGEST}"
 BANNER_DATA="${banner_data}"
 GRIMOIRE_DATA="${GRIMOIRE_DATA}"
+VESSEL_SIGIL="${VESSEL_SIGIL}"
 METADATA_EOF
 
-    # Add the main extraction script
-    cat >> "$output" << 'EXTRACTOR_EOF'
+        # Add the main extraction script
+        cat << 'EXTRACTOR_EOF'
 
 # =============================================================================
 # EXTRACTION SCRIPT
@@ -484,6 +494,7 @@ VERBOSE=0
 NO_PROMPT=0
 NO_BANNER=0
 GRIMOIRE_MODE=0
+VERIFY_MODE=0
 TEMP_DIR=""
 
 # Print functions
@@ -508,6 +519,7 @@ Options:
   -d, --directory DIR    Seed to specified directory (default: current)
   -p, --password PASS    Provide password if vessel is hardened
   -g, --grimoire         Display the project Grimoire (Knowledge & Manifest)
+  -S, --verify           Verify the Sigil of Authenticity (GPG Signature)
   -P, --no-prompt        Do not prompt; error if password missing
   -B, --no-banner        Suppress header output
   -l, --list             List vessel contents without seeding
@@ -526,6 +538,10 @@ HELP
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -S|--verify)
+                VERIFY_MODE=1
+                shift
+                ;;
             -g|--grimoire)
                 GRIMOIRE_MODE=1
                 shift
@@ -662,24 +678,23 @@ decrypt_archive() {
 # List archive contents
 list_archive() {
     local archive="$1"
-    
+
     echo -e "\n${CYAN}Archive Contents:${NC}"
     echo "============================================="
-    
-    # Build tar list command
-    local tar_cmd="tar tf"
+
+    # Invoke tar directly (no eval) using the same flag logic as extract_archive.
     if [[ -n "$TAR_EXTRACT_FLAGS" ]]; then
         if [[ "$TAR_EXTRACT_FLAGS" == --* ]]; then
-            tar_cmd="tar $TAR_EXTRACT_FLAGS -tf"
+            tar "$TAR_EXTRACT_FLAGS" -tf "$archive" 2>/dev/null
         else
-            tar_cmd="tar ${TAR_EXTRACT_FLAGS}tf"
+            tar -"${TAR_EXTRACT_FLAGS}"tf "$archive" 2>/dev/null
         fi
-    fi
-    
-    eval "$tar_cmd \"$archive\"" 2>/dev/null | while read -r line; do
+    else
+        tar -tf "$archive" 2>/dev/null
+    fi | while read -r line; do
         echo "  $line"
     done
-    
+
     echo "============================================="
 }
 
@@ -750,12 +765,24 @@ display_header() {
 
 # Main function
 main() {
-    echo ""
+    # Parse arguments BEFORE any banner display so -B/--no-banner can
+    # suppress the header (and so --grimoire/--verify stay quiet/clean).
+    parse_args "$@"
+
     if [[ $NO_BANNER -eq 0 ]]; then
+        echo ""
         display_header
     fi
-    
-    parse_args "$@"
+
+    if [[ $VERIFY_MODE -eq 1 ]]; then
+        if [[ -n "${VESSEL_SIGIL:-}" ]]; then
+            echo -e "${YELLOW}Verifying Sigil of Authenticity...${NC}"
+            echo "$VESSEL_SIGIL" | base64 -d | gpg --verify
+        else
+            echo "This vessel has no Sigil of Authenticity."
+        fi
+        exit 0
+    fi
     
     if [[ $GRIMOIRE_MODE -eq 1 ]]; then
         if [[ -n "${GRIMOIRE_DATA:-}" ]]; then
@@ -818,6 +845,7 @@ exit 0
 
 __ARCHIVE_BELOW__
 EXTRACTOR_EOF
+    } > "$output"
 
     # Append the raw binary payload
     cat "$payload_file" >> "$output"
@@ -855,9 +883,11 @@ OPTIONS:
   -e, --encrypt          Enable encryption (AES-256-CBC)
   -p, --password PASS    Password for encryption (implies -e)
   -o, --output FILE      Output filename
-  -R, --recursive        Include a copy of bigshebang inside the archive
+  -s, --sign [KEY]       Sign the vessel with GPG (optional KEY ID)
+  -R, --recursive        Include a copy of bigshebang inside the vessel
   -T, --self-test        Run internal self-diagnostic before archiving
   -B, --no-banner        Suppress header and banner output
+      --provenance       Print machine-readable SHA-256 provenance chain only
   -v, --verbose          Show verbose output
   -h, --help             Show this help message
 
@@ -910,6 +940,16 @@ parse_args() {
                 OUTPUT_FILE="$2"
                 shift 2
                 ;;
+            -s|--sign)
+                # Check if next arg is an option or a key
+                if [[ $# -gt 1 ]] && [[ "$2" != -* ]]; then
+                    SIGN_KEY="$2"
+                    shift 2
+                else
+                    SIGN_KEY="default"
+                    shift
+                fi
+                ;;
             -R|--recursive)
                 RECURSIVE=1
                 shift
@@ -920,6 +960,10 @@ parse_args() {
                 ;;
             -B|--no-banner)
                 NO_BANNER=1
+                shift
+                ;;
+            --provenance)
+                PROVENANCE_MODE=1
                 shift
                 ;;
             -v|--verbose)
@@ -962,6 +1006,7 @@ readonly STATE_PREPARE="PREPARE"
 readonly STATE_ARCHIVE="ARCHIVE"
 readonly STATE_HARDEN="HARDEN"
 readonly STATE_ASSEMBLE="ASSEMBLE"
+readonly STATE_SIGN="SIGN"
 readonly STATE_FINALIZE="FINALIZE"
 readonly STATE_CLEANUP="CLEANUP"
 readonly STATE_EXIT="EXIT"
@@ -969,11 +1014,11 @@ readonly STATE_EXIT="EXIT"
 # Global state tracking
 CURRENT_STATE="$STATE_INIT"
 PREVIOUS_STATE=""
-EXIT_CODE=0
 SELF_TEST=0
 
 # Grimoire Data
 GRIMOIRE_DATA=""
+VESSEL_SIGIL=""
 
 # Provenance Chain
 HASH_ARCHIVE=""
@@ -1073,37 +1118,46 @@ state_validate() {
 # State: Chronicle (Knowledge Gathering)
 state_chronicle() {
     info "Communing with the Grimoire..."
-    
-    local temp_grimoire="$(mktemp)"
-    
+
+    local temp_grimoire
+    temp_grimoire="$(mktemp)"
+
     # 1. Header
-    echo "# BIGSHEBANG GRIMOIRE" > "$temp_grimoire"
-    echo "## Project: $(basename "$SOURCE_DIR")" >> "$temp_grimoire"
-    echo "## Generated: $(date)" >> "$temp_grimoire"
-    echo "" >> "$temp_grimoire"
-    
+    {
+        echo "# BIGSHEBANG GRIMOIRE"
+        echo "## Project: $(basename "$SOURCE_DIR")"
+        echo "## Generated: $(date)"
+        echo ""
+    } > "$temp_grimoire"
+
     # 2. Extract Da'at (Intent)
     local daat_file=""
     if [[ -f "$SOURCE_DIR/GRIMOIRE.md" ]]; then daat_file="$SOURCE_DIR/GRIMOIRE.md"; fi
     if [[ -f "$SOURCE_DIR/DAAT.log" ]]; then daat_file="$SOURCE_DIR/DAAT.log"; fi
-    
+
     if [[ -n "$daat_file" ]]; then
         verbose "Found Da'at entry: $daat_file"
-        echo "## Da'at (Intent)" >> "$temp_grimoire"
-        cat "$daat_file" >> "$temp_grimoire"
-        echo "" >> "$temp_grimoire"
+        {
+            echo "## Da'at (Intent)"
+            cat "$daat_file"
+            echo ""
+        } >> "$temp_grimoire"
     fi
     
     # 3. Holographic Manifest
-    echo "## Holographic Manifest" >> "$temp_grimoire"
-    echo "| Path | Size | SHA-256 |" >> "$temp_grimoire"
-    echo "|------|------|---------|" >> "$temp_grimoire"
-    
-    # Scan files (excluding hidden and .git)
-    find "$SOURCE_DIR" -type f ! -path '*/.*' | while read -r f; do
-        local rel_path="${f#$SOURCE_DIR/}"
-        local size=$(wc -c < "$f")
-        local hash=$(calculate_hash "$f")
+    # Provenance policy: include hidden files/directories (e.g. .conception/),
+    # excluding only VCS internals (.git/) by default so provenance stays visible.
+    {
+        echo "## Holographic Manifest"
+        echo "| Path | Size | SHA-256 |"
+        echo "|------|------|---------|"
+    } >> "$temp_grimoire"
+
+    find "$SOURCE_DIR" -type f ! -path '*/.git/*' | while read -r f; do
+        local rel_path size hash
+        rel_path="${f#"$SOURCE_DIR"/}"
+        size=$(wc -c < "$f")
+        hash=$(calculate_hash "$f")
         echo "| $rel_path | $(human_readable_size "$size") | $hash |" >> "$temp_grimoire"
     done
     
@@ -1143,6 +1197,7 @@ run_automaton() {
             "$STATE_ARCHIVE")   state_archive ;;
             "$STATE_HARDEN")    state_harden ;;
             "$STATE_ASSEMBLE")  state_assemble ;;
+            "$STATE_SIGN")      state_sign ;;
             "$STATE_FINALIZE")  state_finalize ;;
             "$STATE_CLEANUP")   state_cleanup ;;
             *) error "Unknown state: $CURRENT_STATE" ;;
@@ -1169,7 +1224,8 @@ state_archive() {
     HASH_ARCHIVE=$(calculate_hash "$tar_file")
     verbose "Archive Hash: $HASH_ARCHIVE"
     
-    local tar_size="$(wc -c < "$tar_file")"
+    local tar_size
+    tar_size="$(wc -c < "$tar_file")"
     info "Archive size: $(human_readable_size "$tar_size")"
     
     transition_to "$STATE_HARDEN"
@@ -1190,7 +1246,8 @@ state_harden() {
     HASH_ENCRYPTED=$(calculate_hash "$encrypted_file")
     verbose "Hardened Hash: $HASH_ENCRYPTED"
     
-    local encrypted_size="$(wc -c < "$encrypted_file")"
+    local encrypted_size
+    encrypted_size="$(wc -c < "$encrypted_file")"
     info "Hardened size: $(human_readable_size "$encrypted_size")"
     
     transition_to "$STATE_ASSEMBLE"
@@ -1202,14 +1259,66 @@ state_assemble() {
     
     HASH_FINAL=$(calculate_hash "$OUTPUT_FILE")
     verbose "Final Script Hash: $HASH_FINAL"
+
+    transition_to "$STATE_SIGN"
+}
+
+state_sign() {
+    if [[ -z "$SIGN_KEY" ]]; then
+        verbose "Signing skipped (no key specified)"
+        transition_to "$STATE_FINALIZE"
+        return
+    fi
+
+    info "Imprinting the Sigil of Authenticity (GPG Sign)..."
     
-    local final_size="$(wc -c < "$OUTPUT_FILE")"
+    local gpg_opts=()
+    if [[ "$SIGN_KEY" != "default" ]]; then
+        gpg_opts+=("--local-user" "$SIGN_KEY")
+    fi
+    
+    # We sign the provenance manifest (hashes)
+    local sign_data sigil_file
+    sign_data="BigShebang Vessel: $(basename "$SOURCE_DIR")
+Archive: $HASH_ARCHIVE
+Payload: $HASH_ENCRYPTED"
+
+    sigil_file="$(mktemp)"
+    if ! echo "$sign_data" | gpg "${gpg_opts[@]}" --clearsign --output "$sigil_file" 2>/dev/null; then
+        warn "GPG signing failed. Distribution vessel will remain unsigned."
+        transition_to "$STATE_FINALIZE"
+        return
+    fi
+    
+    VESSEL_SIGIL=$(base64 -w 0 < "$sigil_file")
+    rm -f "$sigil_file"
+    
+    success "Sigil imprinted: Vessel authenticity verified."
     transition_to "$STATE_FINALIZE"
 }
 
 state_finalize() {
-    local final_size="$(wc -c < "$OUTPUT_FILE")"
-    
+    local final_size
+    final_size="$(wc -c < "$OUTPUT_FILE")"
+
+    # Machine-readable provenance chain for non-interactive capture.
+    # Use `./bigshebang -B --provenance ...` for clean (banner-free) output;
+    # capture hashes with `grep '^sha256\.'`.
+    if [[ "${PROVENANCE_MODE:-0}" -eq 1 ]]; then
+        {
+            echo "# BigShebang Provenance Chain"
+            echo "source=$SOURCE_DIR"
+            echo "output=$OUTPUT_FILE"
+            echo "compression=$COMPRESS_TYPE"
+            echo "encryption=$ENCRYPTION_CIPHER"
+            echo "sha256.archive=$HASH_ARCHIVE"
+            echo "sha256.vessel=$HASH_ENCRYPTED"
+            echo "sha256.final=$HASH_FINAL"
+        }
+        transition_to "$STATE_CLEANUP"
+        return
+    fi
+
     # Summary
     echo ""
     print_color green "========================================"

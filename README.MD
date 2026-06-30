@@ -34,9 +34,11 @@ While BigShebang is designed for open distribution, it supports optional **Paylo
 - `-c, --compress TYPE` : none, gzip, bzip2, xz, zstd (default: gzip)
 - `-e, --encrypt`       : Harden the vessel with encryption
 - `-p, --password PASS` : Provide hardening password (implies -e)
+- `-s, --sign [KEY]`    : Imprint a GPG Sigil of Authenticity on the vessel
 - `-R, --recursive`     : Include a copy of `bigshebang` inside the vessel
-- `-T, --self-test`    : Run internal self-diagnostic before creation
-- `-B, --no-banner`      : Suppress branding output
+- `-T, --self-test`     : Run internal self-diagnostic before creation
+- `-B, --no-banner`     : Suppress branding output
+- `--provenance`        : Emit a machine-readable SHA-256 provenance chain only
 
 ### Seed a Vessel
 ```bash
@@ -48,12 +50,30 @@ While BigShebang is designed for open distribution, it supports optional **Paylo
 ./my_project.vessel.sh --grimoire
 ```
 
+## 🔗 Provenance Chain
+
+Every vessel emits a SHA-256 **provenance chain** spanning each transformation:
+*Original Archive → Transport Vessel → Final Script*. This chain is shown in the
+final summary, and can be captured non-interactively:
+
+```bash
+./bigshebang -B --provenance -o my.vessel.sh ./my_project | grep '^sha256\.'
+```
+
+The `--provenance` option replaces the human summary with a greppable
+`key=value` block (`source`, `output`, `compression`, `encryption`, and the
+three `sha256.*` hashes) suitable for ADR corpora and release attestation.
+
+> Provenance directories such as `.conception/` are preserved in the embedded
+> Grimoire manifest. Only `.git/` is excluded by default; other hidden files
+> remain visible to the manifest layer.
+
 ## 🏗 Philosophy
 
 BigShebang treats distribution not as a "transfer," but as a **Seeding**. By moving from procedural logic to a state-machine automaton, we ensure that the "Big Bang" of your project's deployment is resilient, verifiable, and elegant. It is the soil in which your code grows.
 
 ## 📜 Version
-Current Version: `7.23` (Seeder Edition)
+Current Version: `0.5` (Seeder Edition — Provenance)
 
 ---
 Brought to you by the **0xacabOS** Project.
